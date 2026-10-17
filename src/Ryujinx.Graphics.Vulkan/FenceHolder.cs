@@ -76,8 +76,10 @@ namespace Ryujinx.Graphics.Vulkan
         {
             if (Interlocked.Decrement(ref _referenceCount) == 0)
             {
-                _pool.Return(_fence);
+                // Clear the handle before returning it, as the pool may hand it to another holder immediately.
+                Fence fence = _fence;
                 _fence = default;
+                _pool.Return(fence);
             }
         }
 
