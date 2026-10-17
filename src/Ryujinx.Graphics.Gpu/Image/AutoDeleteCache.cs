@@ -47,7 +47,7 @@ namespace Ryujinx.Graphics.Gpu.Image
     class AutoDeleteCache : IEnumerable<Texture>
     {
         private const int MinCountForDeletion = 32;
-        private const int MaxCapacity = 2048;
+        private const int MaxCapacity = 8192;
         private const ulong GiB = 1024 * 1024 * 1024;
         private ulong MaxTextureSizeCapacity = 4UL * GiB;
         private const ulong MinTextureSizeCapacity = 512 * 1024 * 1024;
