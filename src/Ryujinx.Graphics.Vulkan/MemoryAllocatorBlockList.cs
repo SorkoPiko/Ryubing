@@ -175,18 +175,18 @@ namespace Ryujinx.Graphics.Vulkan
         public int MemoryTypeIndex { get; }
         public bool ForBuffer { get; }
 
-        private readonly int _blockAlignment;
+        private readonly int _blockSize;
 
         private readonly ReaderWriterLockSlim _lock;
 
-        public MemoryAllocatorBlockList(Vk api, Device device, int memoryTypeIndex, int blockAlignment, bool forBuffer)
+        public MemoryAllocatorBlockList(Vk api, Device device, int memoryTypeIndex, int blockSize, bool forBuffer)
         {
             _blocks = [];
             _api = api;
             _device = device;
             MemoryTypeIndex = memoryTypeIndex;
             ForBuffer = forBuffer;
-            _blockAlignment = blockAlignment;
+            _blockSize = blockSize;
             _lock = new(LockRecursionPolicy.NoRecursion);
         }
 
@@ -221,7 +221,7 @@ namespace Ryujinx.Graphics.Vulkan
                 _lock.ExitReadLock();
             }
 
-            ulong blockAlignedSize = BitUtils.AlignUp(size, (ulong)_blockAlignment);
+            ulong blockAlignedSize = BitUtils.AlignUp(size, (ulong)_blockSize);
 
             MemoryAllocateInfo memoryAllocateInfo = new()
             {
@@ -243,10 +243,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             Block newBlock = new(deviceMemory, hostPointer, blockAlignedSize);
 
-            InsertBlock(newBlock);
-
+            // Allocate before the block is visible to other threads, so they can't take or free it first.
             ulong newBlockOffset = newBlock.Allocate(size, alignment);
             Debug.Assert(newBlockOffset != InvalidOffset);
+
+            InsertBlock(newBlock);
 
             return new MemoryAllocation(this, newBlock, deviceMemory, GetHostPointer(newBlock, newBlockOffset), newBlockOffset, size);
         }
@@ -273,18 +274,15 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     // Allocations happen under the read lock, so the block can't be reused while we decide.
                     // Keep one empty standard size block around, so that it isn't recreated soon after.
-                    if (!block.IsTotallyFree() || ((ulong)_blockAlignment == block.Size && !HasOtherFreeBlock(block)))
+                    if (!block.IsTotallyFree() || ((ulong)_blockSize == block.Size && !HasOtherFreeBlock(block)))
                     {
                         return;
                     }
 
-                    for (int i = 0; i < _blocks.Count; i++)
+                    // Another thread freeing the block's last allocations may have already removed it.
+                    if (!_blocks.Remove(block))
                     {
-                        if (_blocks[i] == block)
-                        {
-                            _blocks.RemoveAt(i);
-                            break;
-                        }
+                        return;
                     }
                 }
                 finally

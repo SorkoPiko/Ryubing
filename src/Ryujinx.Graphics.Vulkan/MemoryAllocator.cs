@@ -13,6 +13,7 @@ namespace Ryujinx.Graphics.Vulkan
         // Preferred block sizes, matching the Vulkan Memory Allocator defaults.
         private const ulong LargeHeapBlockSize = 256UL * 1024 * 1024;
         private const ulong SmallHeapMaxSize = 1UL * 1024 * 1024 * 1024;
+        private const ulong MaxBlockSize = 1UL << 30;
 
         private readonly Vk _api;
         private readonly VulkanPhysicalDevice _physicalDevice;
@@ -89,11 +90,10 @@ namespace Ryujinx.Graphics.Vulkan
             ulong heapSize = _physicalDevice.PhysicalDeviceMemoryProperties.MemoryHeaps[(int)heapIndex].Size;
 
             ulong preferredSize = heapSize <= SmallHeapMaxSize ? heapSize / 8 : LargeHeapBlockSize;
+            ulong blockSize = Math.Clamp(Math.Max((ulong)_blockAlignment, preferredSize), 1UL, MaxBlockSize);
 
             // Block sizes are used as an alignment, so they must be a power of two.
-            preferredSize = 1UL << (63 - BitOperations.LeadingZeroCount(Math.Max(preferredSize, 1UL)));
-
-            return (int)Math.Min(int.MaxValue, Math.Max((ulong)_blockAlignment, preferredSize));
+            return (int)(1UL << (63 - BitOperations.LeadingZeroCount(blockSize)));
         }
 
         internal int FindSuitableMemoryTypeIndex(uint memoryTypeBits, MemoryPropertyFlags flags)
