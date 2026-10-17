@@ -20,6 +20,7 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly Lock _queueLock;
         private readonly bool _concurrentFenceWaitUnsupported;
         private readonly CommandPool _pool;
+        private readonly FencePool _fencePool;
         private readonly Thread _owner;
 
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
@@ -84,6 +85,8 @@ namespace Ryujinx.Graphics.Vulkan
             };
 
             api.CreateCommandPool(device, in commandPoolCreateInfo, null, out _pool).ThrowOnError();
+
+            _fencePool = new FencePool(api, device);
 
             // We need at least 2 command buffers to get texture data in some cases.
             _totalCommandBuffers = isLight ? 2 : MaxCommandBuffers;
@@ -349,7 +352,7 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (refreshFence)
             {
-                entry.Fence = new FenceHolder(_api, _device, _concurrentFenceWaitUnsupported);
+                entry.Fence = new FenceHolder(_api, _device, _fencePool, _concurrentFenceWaitUnsupported);
             }
             else
             {
@@ -364,6 +367,7 @@ namespace Ryujinx.Graphics.Vulkan
                 WaitAndDecrementRef(i, refreshFence: false);
             }
 
+            _fencePool.Dispose();
             _api.DestroyCommandPool(_device, _pool, null);
         }
     }

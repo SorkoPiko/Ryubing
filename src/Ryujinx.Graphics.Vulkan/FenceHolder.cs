@@ -8,24 +8,21 @@ namespace Ryujinx.Graphics.Vulkan
     {
         private readonly Vk _api;
         private readonly Device _device;
+        private readonly FencePool _pool;
         private Fence _fence;
         private int _referenceCount;
         private int _lock;
         private readonly bool _concurrentWaitUnsupported;
         private bool _disposed;
 
-        public unsafe FenceHolder(Vk api, Device device, bool concurrentWaitUnsupported)
+        public FenceHolder(Vk api, Device device, FencePool pool, bool concurrentWaitUnsupported)
         {
             _api = api;
             _device = device;
+            _pool = pool;
             _concurrentWaitUnsupported = concurrentWaitUnsupported;
 
-            FenceCreateInfo fenceCreateInfo = new()
-            {
-                SType = StructureType.FenceCreateInfo,
-            };
-
-            api.CreateFence(device, in fenceCreateInfo, null, out _fence).ThrowOnError();
+            _fence = pool.Rent();
 
             _referenceCount = 1;
         }
@@ -79,8 +76,10 @@ namespace Ryujinx.Graphics.Vulkan
         {
             if (Interlocked.Decrement(ref _referenceCount) == 0)
             {
-                _api.DestroyFence(_device, _fence, Span<AllocationCallbacks>.Empty);
+                // Clear the handle before returning it, as the pool may hand it to another holder immediately.
+                Fence fence = _fence;
                 _fence = default;
+                _pool.Return(fence);
             }
         }
 
