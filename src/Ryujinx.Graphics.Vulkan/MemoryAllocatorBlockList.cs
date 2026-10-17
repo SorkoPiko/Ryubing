@@ -50,40 +50,47 @@ namespace Ryujinx.Graphics.Vulkan
 
             public ulong Allocate(ulong size, ulong alignment)
             {
-                for (int i = 0; i < _freeRanges.Count; i++)
+                // Blocks are shared between allocations, which may be made and freed from different threads.
+                lock (_freeRanges)
                 {
-                    Range range = _freeRanges[i];
-
-                    ulong alignedOffset = BitUtils.AlignUp(range.Offset, alignment);
-                    ulong sizeDelta = alignedOffset - range.Offset;
-                    ulong usableSize = range.Size - sizeDelta;
-
-                    if (sizeDelta < range.Size && usableSize >= size)
+                    for (int i = 0; i < _freeRanges.Count; i++)
                     {
-                        _freeRanges.RemoveAt(i);
+                        Range range = _freeRanges[i];
 
-                        if (sizeDelta != 0)
+                        ulong alignedOffset = BitUtils.AlignUp(range.Offset, alignment);
+                        ulong sizeDelta = alignedOffset - range.Offset;
+                        ulong usableSize = range.Size - sizeDelta;
+
+                        if (sizeDelta < range.Size && usableSize >= size)
                         {
-                            InsertFreeRange(range.Offset, sizeDelta);
-                        }
+                            _freeRanges.RemoveAt(i);
 
-                        ulong endOffset = range.Offset + range.Size;
-                        ulong remainingSize = endOffset - (alignedOffset + size);
-                        if (remainingSize != 0)
-                        {
-                            InsertFreeRange(endOffset - remainingSize, remainingSize);
-                        }
+                            if (sizeDelta != 0)
+                            {
+                                InsertFreeRange(range.Offset, sizeDelta);
+                            }
 
-                        return alignedOffset;
+                            ulong endOffset = range.Offset + range.Size;
+                            ulong remainingSize = endOffset - (alignedOffset + size);
+                            if (remainingSize != 0)
+                            {
+                                InsertFreeRange(endOffset - remainingSize, remainingSize);
+                            }
+
+                            return alignedOffset;
+                        }
                     }
-                }
 
-                return InvalidOffset;
+                    return InvalidOffset;
+                }
             }
 
             public void Free(ulong offset, ulong size)
             {
-                InsertFreeRangeComingled(offset, size);
+                lock (_freeRanges)
+                {
+                    InsertFreeRangeComingled(offset, size);
+                }
             }
 
             private void InsertFreeRange(ulong offset, ulong size)
@@ -127,13 +134,16 @@ namespace Ryujinx.Graphics.Vulkan
 
             public bool IsTotallyFree()
             {
-                if (_freeRanges.Count == 1 && _freeRanges[0].Size == Size)
+                lock (_freeRanges)
                 {
-                    Debug.Assert(_freeRanges[0].Offset == 0);
-                    return true;
-                }
+                    if (_freeRanges.Count == 1 && _freeRanges[0].Size == Size)
+                    {
+                        Debug.Assert(_freeRanges[0].Offset == 0);
+                        return true;
+                    }
 
-                return false;
+                    return false;
+                }
             }
 
             public int CompareTo(Block other)
@@ -165,18 +175,18 @@ namespace Ryujinx.Graphics.Vulkan
         public int MemoryTypeIndex { get; }
         public bool ForBuffer { get; }
 
-        private readonly int _blockAlignment;
+        private readonly int _blockSize;
 
         private readonly ReaderWriterLockSlim _lock;
 
-        public MemoryAllocatorBlockList(Vk api, Device device, int memoryTypeIndex, int blockAlignment, bool forBuffer)
+        public MemoryAllocatorBlockList(Vk api, Device device, int memoryTypeIndex, int blockSize, bool forBuffer)
         {
             _blocks = [];
             _api = api;
             _device = device;
             MemoryTypeIndex = memoryTypeIndex;
             ForBuffer = forBuffer;
-            _blockAlignment = blockAlignment;
+            _blockSize = blockSize;
             _lock = new(LockRecursionPolicy.NoRecursion);
         }
 
@@ -211,7 +221,7 @@ namespace Ryujinx.Graphics.Vulkan
                 _lock.ExitReadLock();
             }
 
-            ulong blockAlignedSize = BitUtils.AlignUp(size, (ulong)_blockAlignment);
+            ulong blockAlignedSize = BitUtils.AlignUp(size, (ulong)_blockSize);
 
             MemoryAllocateInfo memoryAllocateInfo = new()
             {
@@ -233,10 +243,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             Block newBlock = new(deviceMemory, hostPointer, blockAlignedSize);
 
-            InsertBlock(newBlock);
-
+            // Allocate before the block is visible to other threads, so they can't take or free it first.
             ulong newBlockOffset = newBlock.Allocate(size, alignment);
             Debug.Assert(newBlockOffset != InvalidOffset);
+
+            InsertBlock(newBlock);
 
             return new MemoryAllocation(this, newBlock, deviceMemory, GetHostPointer(newBlock, newBlockOffset), newBlockOffset, size);
         }
@@ -261,13 +272,17 @@ namespace Ryujinx.Graphics.Vulkan
 
                 try
                 {
-                    for (int i = 0; i < _blocks.Count; i++)
+                    // Allocations happen under the read lock, so the block can't be reused while we decide.
+                    // Keep one empty standard size block around, so that it isn't recreated soon after.
+                    if (!block.IsTotallyFree() || ((ulong)_blockSize == block.Size && !HasOtherFreeBlock(block)))
                     {
-                        if (_blocks[i] == block)
-                        {
-                            _blocks.RemoveAt(i);
-                            break;
-                        }
+                        return;
+                    }
+
+                    // Another thread freeing the block's last allocations may have already removed it.
+                    if (!_blocks.Remove(block))
+                    {
+                        return;
                     }
                 }
                 finally
@@ -277,6 +292,23 @@ namespace Ryujinx.Graphics.Vulkan
 
                 block.Destroy(_api, _device);
             }
+        }
+
+        private bool HasOtherFreeBlock(Block block)
+        {
+            // Assumes the lock is held as writer.
+
+            for (int i = 0; i < _blocks.Count; i++)
+            {
+                Block other = _blocks[i];
+
+                if (other != block && other.Size == block.Size && other.Mapped == block.Mapped && other.IsTotallyFree())
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void InsertBlock(Block block)

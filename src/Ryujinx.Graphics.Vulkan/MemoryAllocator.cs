@@ -1,6 +1,7 @@
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Threading;
 
 namespace Ryujinx.Graphics.Vulkan
@@ -8,6 +9,11 @@ namespace Ryujinx.Graphics.Vulkan
     class MemoryAllocator : IDisposable
     {
         private const ulong MaxDeviceMemoryUsageEstimate = 16UL * 1024 * 1024 * 1024;
+
+        // Preferred block sizes, matching the Vulkan Memory Allocator defaults.
+        private const ulong LargeHeapBlockSize = 256UL * 1024 * 1024;
+        private const ulong SmallHeapMaxSize = 1UL * 1024 * 1024 * 1024;
+        private const ulong MaxBlockSize = 1UL << 30;
 
         private readonly Vk _api;
         private readonly VulkanPhysicalDevice _physicalDevice;
@@ -65,7 +71,7 @@ namespace Ryujinx.Graphics.Vulkan
 
             try
             {
-                MemoryAllocatorBlockList newBl = new(_api, _device, memoryTypeIndex, _blockAlignment, isBuffer);
+                MemoryAllocatorBlockList newBl = new(_api, _device, memoryTypeIndex, GetBlockSize(memoryTypeIndex), isBuffer);
                 _blockLists.Add(newBl);
 
                 return newBl.Allocate(size, alignment, map);
@@ -74,6 +80,20 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 _lock.ExitWriteLock();
             }
+        }
+
+        private int GetBlockSize(int memoryTypeIndex)
+        {
+            // Some drivers report an effectively unlimited allocation count, which would make every
+            // allocation its own block. Memory allocations are expensive, so prefer large blocks.
+            uint heapIndex = _physicalDevice.PhysicalDeviceMemoryProperties.MemoryTypes[memoryTypeIndex].HeapIndex;
+            ulong heapSize = _physicalDevice.PhysicalDeviceMemoryProperties.MemoryHeaps[(int)heapIndex].Size;
+
+            ulong preferredSize = heapSize <= SmallHeapMaxSize ? heapSize / 8 : LargeHeapBlockSize;
+            ulong blockSize = Math.Clamp(Math.Max((ulong)_blockAlignment, preferredSize), 1UL, MaxBlockSize);
+
+            // Block sizes are used as an alignment, so they must be a power of two.
+            return (int)(1UL << (63 - BitOperations.LeadingZeroCount(blockSize)));
         }
 
         internal int FindSuitableMemoryTypeIndex(uint memoryTypeBits, MemoryPropertyFlags flags)
